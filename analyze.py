@@ -2,7 +2,7 @@
 analyze.py — core logic for depcheck
   1. Fetch requirements.txt (local or GitHub URL)
   2. Run pip-audit to get transitive deps + vuln findings
-  3. Download top 5000 PyPI packages by download count (ground truth)
+  3. Download top 10,000 PyPI packages by download count (ground truth)
   4. For each dep, check if it resembles a popular legitimate package
      — if it does AND it has suspicious metadata, flag it as a likely typosquat
   5. Return structured results
