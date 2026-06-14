@@ -38,6 +38,13 @@ Then open http://localhost:8080
 
 ---
 
+### Tool Input
+1- A URL to the requirements.txt page for a git repo
+
+2- A local requirements.txt file you can upload
+
+---
+
 ### Test Data
 the Test Data directory contains a requirements.txt which can be used for testing.
 
