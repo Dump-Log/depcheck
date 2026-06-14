@@ -38,6 +38,10 @@ Then open http://localhost:8080
 
 ---
 
+### Test Data
+the Test Data directory contains a requirements.txt which can be used for testing.
+
+---
 ## Scoring
 
 Typosquat findings are scored 0.0–1.0 based on:
