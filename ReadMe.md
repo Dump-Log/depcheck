@@ -1,6 +1,6 @@
 # DepCheck
 
-Supply chain risk scanner for Python projects. Detects typosquatted dependencies and audits for known vulnerabilities across the full transitive dependency tree.
+A Web based supply chain risk scanner for Python projects. Detects typosquatted dependencies and audits for known vulnerabilities across the full transitive dependency tree.
 
 ## What it does
 
@@ -38,6 +38,17 @@ Then open http://localhost:8080
 
 ---
 
+### Tool Input
+1- A URL to the requirements.txt page for a git repo
+
+2- A local requirements.txt file you can upload
+
+---
+
+### Test Data
+the Test Data directory contains a requirements.txt which can be used for testing.
+
+---
 ## Scoring
 
 Typosquat findings are scored 0.0–1.0 based on:
