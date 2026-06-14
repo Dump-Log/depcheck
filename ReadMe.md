@@ -1,6 +1,6 @@
 # DepCheck
 
-Supply chain risk scanner for Python projects. Detects typosquatted dependencies and audits for known vulnerabilities across the full transitive dependency tree.
+A Web based supply chain risk scanner for Python projects. Detects typosquatted dependencies and audits for known vulnerabilities across the full transitive dependency tree.
 
 ## What it does
 
