@@ -1,3 +1,4 @@
+import os
 import tempfile
 import streamlit as st
 from analyze import analyze, AnalysisResult
@@ -30,7 +31,10 @@ input_mode = st.radio("Input method", ["GitHub URL", "Upload File"], horizontal=
 
 uploaded_file = None
 if input_mode == "Upload File":
-    uploaded_file = st.file_uploader("requirements.txt", type=["txt"])
+    uploaded_file = st.file_uploader(
+        "requirements.txt, pyproject.toml, Pipfile, or setup.py",
+        type=None,  # no filter — Pipfile has no extension
+    )
 
 with st.form("analysis_form"):
     source_url = None
@@ -57,7 +61,10 @@ tmp_path = None
 
 if run:
     if input_mode == "Upload File" and uploaded_file:
-        with tempfile.NamedTemporaryFile(mode="wb", suffix=".txt", delete=False) as f:
+        # Use original filename as suffix so _detect_file_type works correctly
+        original_name = uploaded_file.name
+        suffix = "." + original_name.split(".")[-1] if "." in original_name else ".txt"
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=f"_{original_name}", delete=False) as f:
             f.write(uploaded_file.read())
             tmp_path = f.name
         source = tmp_path
@@ -84,6 +91,9 @@ if run and source:
     if result.errors:
         for e in result.errors:
             st.warning(e)
+
+    # Show detected file type
+    st.info(f"📄 Detected dependency file: **{result.file_type}**")
 
     # ---------------------------------------------------------------------------
     # Summary metrics
@@ -125,13 +135,11 @@ if run and source:
                         color, label = "🔵", "LOW"
 
                     with st.container(border=True):
-                        # Header row
                         col_a, col_b, col_c = st.columns([2, 2, 1])
                         col_a.markdown(f"**`{f.dep_name}`** version `{f.dep_version}`")
                         col_b.markdown(f"resembles popular package **`{f.resembles}`** (edit distance {f.edit_distance})")
                         col_c.markdown(f"{color} **{label}** — score `{f.suspicion_score:.2f}`")
 
-                        # Metadata row
                         meta_cols = st.columns(4)
 
                         if f.days_since_first_upload is not None:
@@ -156,7 +164,6 @@ if run and source:
                         if f.pypi_url:
                             meta_cols[3].markdown(f"[View on PyPI ↗]({f.pypi_url})")
 
-                        # Author + source info
                         info_parts = []
                         if f.author:
                             info_parts.append(f"**Author:** {f.author}")
@@ -182,7 +189,6 @@ if run and source:
                         if info_parts:
                             st.caption(" · ".join(info_parts))
 
-                        # Signals
                         st.markdown("**Suspicion signals:**")
                         for signal in f.signals:
                             st.caption(f"• {signal}")
@@ -231,7 +237,6 @@ if run and source:
 
     # Clean up temp file if one was created
     if tmp_path:
-        import os
         try:
             os.unlink(tmp_path)
         except OSError:

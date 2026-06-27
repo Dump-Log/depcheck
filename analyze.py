@@ -8,10 +8,12 @@ analyze.py — core logic for depcheck
   5. Return structured results
 """
 
+import ast
 import json
 import re
 import subprocess
 import tempfile
+import tomllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date
@@ -71,6 +73,7 @@ class AnalysisResult:
     dependencies: list[Dependency]
     squat_findings: list[SquatFinding]
     errors: list[str]
+    file_type: str = "requirements.txt"
 
 # Primary and fallback URLs for top PyPI packages list
 TOP_PACKAGES_URLS = [
@@ -90,10 +93,32 @@ def normalize(name: str) -> str:
     """PyPI normalisation: lowercase, collapse runs of [-_.] to '-'."""
     return re.sub(r"[-_.]+", "-", name).lower()
 
+# Supported dependency file names — searched in order when given a repo URL
+SUPPORTED_FILES = [
+    "requirements.txt",
+    "requirements/base.txt",
+    "requirements/prod.txt",
+    "requirements/production.txt",
+    "pyproject.toml",
+    "Pipfile",
+    "setup.py",
+]
+
+def _detect_file_type(source_label: str) -> str:
+    """Infer the dependency file type from its path or URL."""
+    label = source_label.lower()
+    if label.endswith(".toml") or "pyproject.toml" in label:
+        return "pyproject.toml"
+    if "pipfile" in label or label.endswith("pipfile"):
+        return "Pipfile"
+    if label.endswith("setup.py") or "setup.py" in label or (label.endswith(".py") and "setup" in label):
+        return "setup.py"
+    return "requirements.txt"
+
 # gets requirements file
-# Returns tuple (requirements_text, source_label).
+# Returns tuple (requirements_text, source_label, file_type).
 # Accepts a local file path, GitHub repo URL, or GitHub blob URL.
-def fetch_requirements(source: str) -> tuple[str, str]:
+def fetch_requirements(source: str) -> tuple[str, str, str]:
 
     # if url is to main page and not raw
     if "github.com" in source and "/blob/" in source:
@@ -103,25 +128,44 @@ def fetch_requirements(source: str) -> tuple[str, str]:
                    .replace("/blob/", "/"))
         resp = requests.get(raw_url, timeout=10)
         resp.raise_for_status()
-        return resp.text, raw_url
+        file_type = _detect_file_type(raw_url)
+        return resp.text, raw_url, file_type
 
     # if page is to the raw
     if "githubusercontent" in source:
         resp = requests.get(source, timeout=10)
         resp.raise_for_status()
-        return resp.text, source
+        file_type = _detect_file_type(source)
+        return resp.text, source, file_type
+
+    # GitHub repo root URL — search for supported dependency files
+    github_repo_re = re.compile(r"https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$")
+    m = github_repo_re.match(source)
+    if m:
+        owner, repo = m.group(1), m.group(2)
+        for branch in ("main", "master"):
+            for fname in SUPPORTED_FILES:
+                raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{fname}"
+                resp = requests.get(raw_url, timeout=10)
+                if resp.status_code == 200:
+                    return resp.text, raw_url, _detect_file_type(fname)
+        raise FileNotFoundError(f"No supported dependency file found in {source}")
 
     # no url so moving to file upload
     p = Path(source)
     if p.exists():
-        return p.read_text(), str(p.resolve())
+        file_type = _detect_file_type(str(p))
+        return p.read_text(), str(p.resolve()), file_type
 
     raise ValueError(f"Cannot interpret source: {source!r}")
 
-# Return {normalised_name: original_line} for each non-comment requirement
-def _parse_req_lines(requirements_text: str) -> dict[str, str]:
+# ---------------------------------------------------------------------------
+# Parsers for each supported file format
+# ---------------------------------------------------------------------------
+
+def _parse_requirements_txt(text: str) -> dict[str, str]:
     result = {}
-    for line in requirements_text.splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("-"):
             continue
@@ -129,13 +173,95 @@ def _parse_req_lines(requirements_text: str) -> dict[str, str]:
             line.split("==")[0].split(">=")[0].split("<=")[0]
             .split("~=")[0].split("!=")[0].split("[")[0].strip()
         )
-        result[name] = line
+        if name:
+            result[name] = line
     return result
 
+def _parse_pyproject_toml(text: str) -> dict[str, str]:
+    result = {}
+    try:
+        data = tomllib.loads(text)
+    except Exception:
+        return result
+    # PEP 621 — parse first, these take priority
+    for dep in data.get("project", {}).get("dependencies", []):
+        name = normalize(re.split(r"[>=<!;\[]", dep)[0].strip())
+        if name:
+            result[name] = dep
+    # Poetry — only add if not already present from PEP 621
+    poetry_deps = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
+    for pkg, spec in poetry_deps.items():
+        if pkg.lower() == "python":
+            continue
+        name = normalize(pkg)
+        if name not in result:
+            version = spec if isinstance(spec, str) else ""
+            # Convert poetry ^ to >= for pip compatibility
+            version = version.replace("^", ">=").replace("~", ">=")
+            result[name] = f"{pkg}{version}" if version else pkg
+    # Poetry groups — only add if not already present
+    for group in data.get("tool", {}).get("poetry", {}).get("group", {}).values():
+        for pkg in group.get("dependencies", {}).keys():
+            name = normalize(pkg)
+            if name and name not in result:
+                result[name] = pkg
+    return result
 
-# Returns only the dependencies not the versions if they are lsited
-def _parse_direct_names(requirements_text: str) -> set[str]:
-    return set(_parse_req_lines(requirements_text).keys())
+def _parse_pipfile(text: str) -> dict[str, str]:
+    result = {}
+    try:
+        data = tomllib.loads(text)
+    except Exception:
+        return result
+    # Only parse production packages — dev-packages are excluded
+    for pkg, spec in data.get("packages", {}).items():
+        name = normalize(pkg)
+        version = spec if isinstance(spec, str) and spec != "*" else ""
+        result[name] = f"{pkg}{version}" if version else pkg
+    return result
+
+def _parse_setup_py(text: str) -> dict[str, str]:
+    result = {}
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return result
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func_name = ""
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+        if func_name != "setup":
+            continue
+        for kw in node.keywords:
+            if kw.arg != "install_requires":
+                continue
+            if isinstance(kw.value, ast.List):
+                for elt in kw.value.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                        dep = elt.value.strip()
+                        name = normalize(re.split(r"[>=<!;\[]", dep)[0].strip())
+                        if name:
+                            result[name] = dep
+    return result
+
+# Return {normalised_name: original_line} for each non-comment requirement
+def _parse_req_lines(text: str, file_type: str = "requirements.txt") -> dict[str, str]:
+    """Dispatch to the correct parser based on file type."""
+    if file_type == "pyproject.toml":
+        return _parse_pyproject_toml(text)
+    if file_type == "Pipfile":
+        return _parse_pipfile(text)
+    if file_type == "setup.py":
+        return _parse_setup_py(text)
+    return _parse_requirements_txt(text)
+
+# Returns only the dependencies not the versions if they are listed
+def _parse_direct_names(text: str, file_type: str = "requirements.txt") -> set[str]:
+    return set(_parse_req_lines(text, file_type).keys())
 
 # runs pip-audit on the requirements file
 # returns json or nothing on fail
@@ -153,17 +279,16 @@ def _run_pip_audit_on_file(tmp_path: str) -> Optional[dict]:
     return None
 
 # wrapper for pip-audit, if full run fails due to unknown package
-# re-runw ith unkonwn package removed
-def run_pip_audit(requirements_text: str) -> tuple[list[Dependency], list[str]]:
+# re-runs with unknown package removed
+def run_pip_audit(requirements_text: str, file_type: str = "requirements.txt") -> tuple[list[Dependency], list[str]]:
     errors = []
     deps = []
-    req_lines = _parse_req_lines(requirements_text)
+    req_lines = _parse_req_lines(requirements_text, file_type)
     direct_names = set(req_lines.keys())
 
-    # if pip-audit has unresolved packages it errors out and doens't kepe running,
+    # if pip-audit has unresolved packages it errors out and doesn't keep running,
     # needed logic to manage that behavior
     resolvable: dict[str, str] = dict(req_lines)   # name -> original line
-    # unresolvable: set[str] = set()
 
     try:
         # First attempt: full requirements file
@@ -194,7 +319,6 @@ def run_pip_audit(requirements_text: str) -> tuple[list[Dependency], list[str]]:
                 # Binary search: try first half, mark second half as suspect
                 if len(remaining) == 1:
                     # Single package that fails — mark unresolvable
-                    # unresolvable.add(remaining[0])
                     del resolvable[remaining[0]]
                     remaining = list(resolvable.keys())
                     data = None
@@ -220,7 +344,6 @@ def run_pip_audit(requirements_text: str) -> tuple[list[Dependency], list[str]]:
                 name = item["name"]
                 version = item["version"]
                 is_direct = normalize(name) in direct_names
-                # VulnFinding is a dataclass
                 vulns = [
                     VulnFinding(
                         vuln_id=v["id"],
@@ -256,7 +379,7 @@ def get_top_pypi_packages(top_n: int = TOP_TO_CHECK, status_callback=None) -> se
     if status_callback:
         status_callback(f"Downloading top {top_n} PyPI packages list...")
 
-    # try grabbing data from the two urls, they are mirros just diff repos
+    # try grabbing data from the two urls, they are mirrors just diff repos
     for url in TOP_PACKAGES_URLS:
         try:
             resp = requests.get(url, timeout=15)
@@ -310,7 +433,7 @@ def closest_popular_match(dep_name: str, top_packages: set[str], max_dist: int =
 
     return (best_name, best_dist) if best_name else None
 
-# Higher score = more suspecious
+# Higher score = more suspicious
 def score_dep(dep: Dependency, resembles: str, edit_distance: int, metadata: dict) -> SquatFinding:
     signals = []
     score = 0.0
@@ -440,23 +563,23 @@ def analyze(source: str, status_callback=None, skip_squats: bool = False) -> Ana
             status_callback(msg)
 
     # 1. Fetch requirements
-    status("Fetching requirements.txt...")
+    status("Fetching requirements file...")
     try:
-        req_text, source_label = fetch_requirements(source)
+        req_text, source_label, file_type = fetch_requirements(source)
     except (FileNotFoundError, ValueError, requests.RequestException) as e:
-        return AnalysisResult(dependencies=[], squat_findings=[], errors=[str(e)])
+        return AnalysisResult(dependencies=[], squat_findings=[], errors=[str(e)], file_type="unknown")
 
-    status(f"Loaded requirements from {source_label}")
+    status(f"Loaded {file_type} from {source_label}")
 
     # 2. Parse raw package names directly from requirements text.
     #    This is used for squat detection and is independent of pip-audit.
-    raw_names = _parse_direct_names(req_text)
-    status(f"Parsed {len(raw_names)} package name(s) from requirements.")
+    raw_names = _parse_direct_names(req_text, file_type)
+    status(f"Parsed {len(raw_names)} package name(s) from {file_type}.")
 
     # 3. pip-audit — vulnerability scan.
     #    Runs in isolation; failures are recorded but do not abort the pipeline.
     status("Running pip-audit for vulnerability scan (this may take a minute)...")
-    deps, audit_errors = run_pip_audit(req_text)
+    deps, audit_errors = run_pip_audit(req_text, file_type)
     if audit_errors:
         for e in audit_errors:
             errors.append(f"pip-audit: {e}")
@@ -545,4 +668,5 @@ def analyze(source: str, status_callback=None, skip_squats: bool = False) -> Ana
         dependencies=deps,
         squat_findings=squat_findings,
         errors=errors,
+        file_type=file_type,
     )
