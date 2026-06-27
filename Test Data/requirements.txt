@@ -1,6 +1,15 @@
-flask==2.0.0
+# Standard requirements.txt example
+# Contains a mix of legitimate and suspicious packages for testing
+
+# Legitimate packages
 requests==2.28.0
-panda==0.3.1
-nump==7.29.0
+flask==2.0.0
+numpy==1.24.0
+
+# Suspicious packages — should trigger typosquatting detection
 panadas==0.2
 scikit-learns==0.1.0
+panda==0.3.1
+
+# Non-existent package — should flag as not found
+nump==7.29.0
