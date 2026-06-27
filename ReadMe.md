@@ -4,7 +4,7 @@ A Web based supply chain risk scanner for Python projects. Detects typosquatted 
 
 ## What it does
 
-- Resolves the full transitive dependency tree from a `requirements.txt`
+- Resolves the full transitive dependency tree from a `requirements.txt, pipfile, .toml, setup.py`
 - Checks every dependency (direct and transitive) for known CVEs via pip-audit
 - Detects potential typosquatting by comparing dependencies against the top 10,000 most downloaded PyPI packages
 - Accepts GitHub repo URLs or uploaded `requirements.txt` files as input
@@ -46,7 +46,7 @@ Then open http://localhost:8080
 ---
 
 ### Test Data
-the Test Data directory contains a requirements.txt which can be used for testing.
+the Test Data directory contains multiple files of different types for scanning.
 
 ---
 ## Scoring
