@@ -1,50 +1,67 @@
-Problem Definition
+# Problem Definition
 
-1. Specific Problem this addresses
+### 1. Specific Problem this addresses
 
-* This tool attempts to first identify potential typos or likely typo-squatting attacks, allowing a user to audit their own and others' requirements.txt files.
-* Secondly, it attempts to clearly show the CVEs for both direct dependencies and transitive dependencies.
+When dealing with a lot of screenshots, either for creating documentation, sharing knowledge, or producing evidence as part of a GRC audit, it is easy to accidentally include secrets, passwords, IP’s, API keys, tokens, ect which leaks information. For technical users, this serves as a second check; for non-technical users who may not recognize sensitive information as readily, this serves as a learning tool and also a second check.
 
-2. Why is this problem important
 
-* When cloning projects from GitHub in Python, they often include a requirements.txt file, which installs the required dependencies to run the project. These dependencies can be, at best, strong and secure, but at worst, full of known security risks or even vulnerable to an attack called Typosquatting. This is when a threat actor uploads a malicious library to PyPI that is similar to a known package, hoping someone will make a typo and use their malicious package instead. 
 
-3. Existing tools or approaches
+### 2. Why is this problem important
 
-* There are many tools to securely audit dependencies, in fact, depcheck uses pip-audit, which is a well-supported and popular tool for auditing Python dependencies.
-* For the typosquatting, I was able to find a few open source projects that attempted to do the same, but the signals used to determine where they differ.
+It is easy to overlook an object in the background or sidebar of an image and accidentally leak information when producing and using screenshots.
 
-4. What Gap does this tool fill
 
-* This shows multiple signals indicating a suspicious package, most notably the use of the Levenshtein distance. This is the number of single-character edits between two words. So, in addition to providing CVE’s for dependencies, it also uses Levenshtein distance to flag suspicious packages, providing more traditional IOC information.
 
-System Design
+### 3. Existing tools or approaches
 
-1. High-Level Architecture
+There are existing tools that can help do this; for example, Jira has the capability to do this. Any agents or LLM powered tools can easily do this as well. These tools are not free, and in cases of AI, there are data privacy issues if not using an enterprise version that keeps prompt data safe.
 
-* The Project is split into 2 files
-  * analyze.py - all logic, no UI, when called, it runs 3 independent tasks
-    * 1 Vulnerability scan - uses pip-audit to resolve the full transitive dependence tree and checks them against the OSV advisory database. If a package fails to resolve, it does a binary search to determine which package is not resolvable. These are marked as not found and highlighted in the UI.
-    * 2 Typosquat Detection -  downloads the top 10,000 packages from PyPI for the ground truth list. For each dependency in the requirements.txt, it computes Levenshtein distance against the top 10,000 and flags suspicious findings. MetaData is fetched from the PyPI JSON API concurrently and assigned a score of 0.0-1.0.
-    * 3 Results - Both 1 & 2 return a single AnalysisResult dataclass, which is passed to the UI
-  * app.py - Steamlit frontend. It accepts a GitHub URL to a requirements.txt, or you can upload a local requirements.txt. It calls analyze(), and produces the results as an interactive web page.
 
-2. Technological choices and justification
 
-* Levenshtein distance to determine if two words are similar, this is used to detect possible typos, a well known algorithm, and is fast.
-* pip-audit, a well known pyhton dependency security audit tool, provides the information needed and functions well.
-* Docker -  To help make reproducibility easier, this is bundled as a Docker, and users can either build it themself, or use the image hosted on Docker Hub to run it.
+### 4. What Gap does this tool fill
 
-Evaluation
+This tool fills the gap that free OCR secret detection that runs locally and does not utilize AI in its decision making is very limited.
 
-1. How I tested
 
-* I created an example requirements.txt file and specifically identified packages with similar names, such as panadas instead of pandas, so it could find similar names and generate results.
 
-2. Results
+# System Design
 
-* As expected, it found the proper similar package and provided the relevant information in the web UI
+### 1. High-Level Architecture
 
-3. Known Issues
+* core.py — preprocessing and OCR; it handles adaptive upscale, dark-mode invert, OCR-in-bands for tall/mixed pages, and does OCR via Tesseract, producing words with bounding boxes.
+* detect.py — YAML-defined detectors, generate candidates; reject-only validators filter false positives; dedupe merges overlapping hits.
+* app.py — Handles the front end web UI.
 
-* If a typo resulted in multiple hits that are Levenshtein distance 1 away, it may not report on each one. It was hard to test this, and it is very unlikely that a requirements.txt would have multiple typosquatting attacks to the top 10,000 packages.
+
+
+### 2. Technological choices and justification
+
+* Tesseract OCR — this is free, local, with no API, and no network, keep data private and local. A cloud OCR would mean uploading screenshots full of secrets, which contradicts the tool's purpose.
+
+* Rules  — deterministic, explainable, reproducible by classmates, and fixable in one line. No training data for "screenshots-with-secrets" exists anyway.
+
+* Python + Pillow/NumPy — mature OCR/imaging 
+
+* Streamlit — a functional web UI in minimal code
+
+* Docker — one reproducible command; pins Tesseract version so results don't drift between machines.
+
+
+
+# Evaluation
+
+### 1. How I tested
+
+  I added an OCR output to the web page and was able to run screenshots and detect what language was captured. This helped narrow down whether it was an OCR processing problem or a rule-matching problem. When possible, I took my own screenshots or found examples online. Later, I had Claude AI generate a sample set of images.
+
+### 2. Results
+
+  OCR is not perfect, and it often makes mistakes. In general, things work as expected, but certain combinations of color and text, or GUI markings, may cause the OCR to not recognize the text in certain cases. General issues had to be worked out and fixed, but not all possibilities have been accounted for.
+
+
+
+### 3. Known Issues
+
+While it supports multiple input types, JPEG functions the worst and PNG’s function the best. This is a general behavior with OCR since the former is compressed and the latter is lossless.
+
+Sometimes the boxes to redact text do not fully cover the text; I think having them human resizable in the future would make sense, but this has to do with the detection rules and at times, the way OCR reads text.
